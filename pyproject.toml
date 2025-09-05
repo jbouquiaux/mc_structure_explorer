@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mc_structure_explorer"
+version = "0.1.0"
+description = "Monte Carlo engine for structure exploration using Metropolis sampling"
+authors = [
+    {name="Your Name", email="you@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pymatgen",
+    "ase",
+    "mace-torch",
+    "mace",
+    "chemiscope",
+    "tqdm"
+]
+
+[project.scripts]
+run-mc = "mc_structure_explorer.scripts.run_mc:main"

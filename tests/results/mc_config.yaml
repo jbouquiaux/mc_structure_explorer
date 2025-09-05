@@ -1,0 +1,44 @@
+{
+  "n_runs": 1,
+  "seeds": null,
+  "seed_global": 1234,
+  "same_initial_structure": false,
+  "verbose": true,
+  "n_steps": 10,
+  "T_start": 0.1,
+  "T_end": 0.001,
+  "thin": 1,
+  "burn_frac": 0.0,
+  "bias_strength": 0.0,
+  "eu_bias_strength": 0.0,
+  "eu_move_prob": 0.0,
+  "base_structure_path": "/Users/jbouquiaux/softwares/mc_structure_explorer/tests/./prim.cif",
+  "supercell_matrix": [
+    [
+      2,
+      0,
+      0
+    ],
+    [
+      0,
+      2,
+      0
+    ],
+    [
+      0,
+      0,
+      4
+    ]
+  ],
+  "n_Al": 3,
+  "n_O": 3,
+  "n_Eu": 0,
+  "Eu_position": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "calculation_type": "mace_small",
+  "result_dir": "/Users/jbouquiaux/softwares/mc_structure_explorer/tests/./results",
+  "chemiscope_dir": "/Users/jbouquiaux/softwares/mc_structure_explorer/tests/./chemiscope"
+}

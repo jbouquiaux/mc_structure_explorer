@@ -1,0 +1,7 @@
+numpy
+pymatgen
+ase
+mace-torch
+mace
+chemiscope
+tqdm

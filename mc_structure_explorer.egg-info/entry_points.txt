@@ -1,0 +1,2 @@
+[console_scripts]
+run-mc = mc_structure_explorer.scripts.run_mc:main

@@ -1,0 +1,48 @@
+# -------------------------
+# General run settings
+# -------------------------
+n_runs: 1                  # Number of parallel Monte Carlo chains
+seeds: null                # List of seeds for each run; null = auto-generate from seed_global
+seed_global: 1234          # Global seed for reproducibility
+same_initial_structure: false  # If true, all chains start from the same initial structure
+verbose: true             # If true, print progress information during runs
+
+# -------------------------
+# Monte Carlo parameters
+# -------------------------
+n_steps: 10              # Number of steps per chain
+T_start: 0.1               # Starting temperature (eV)
+T_end: 0.001               # Final temperature (eV)
+thin: 1                    # Thinning interval for storing trajectory
+burn_frac: 0.0             # Fraction of trajectory to discard as burn-in
+bias_strength: 0.0         # Strength of bias toward Al-O aggregation
+eu_bias_strength: 0.0      # Strength of bias toward placing O/Al near Eu
+eu_move_prob: 0.0          # Probability of moving Eu in a step (0 = never, 1 = always)
+
+# -------------------------
+# Structure and supercell
+# -------------------------
+base_structure_path: "./prim.cif"    # Path to base structure CIF file
+supercell_matrix:                     # Supercell expansion matrix
+  - [2, 0, 0]
+  - [0, 2, 0]
+  - [0, 0, 4]
+
+# -------------------------
+# Dopant/interstitial specification
+# -------------------------
+n_Al: 3                 # Number of Al dopants replacing Si
+n_O: 3                  # Number of O dopants replacing N
+n_Eu: 0                 # Number of Eu interstitials
+Eu_position: [0.5, 0.5, 0.5]   # Fractional coordinates for Eu interstitial, ignored if n_Eu=0
+
+# -------------------------
+# Energy model
+# -------------------------
+calculation_type: "mace_small"   # "ewald" or "mace_small"
+
+# -------------------------
+# Output directories
+# -------------------------
+result_dir: "./results"          # Directory to save JSON result files
+chemiscope_dir: "./chemiscope"   # Directory to save Chemiscope datasets

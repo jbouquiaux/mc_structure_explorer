@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: mc_structure_explorer
+Version: 0.1.0
+Summary: Monte Carlo engine for structure exploration using Metropolis sampling
+Author: Your Name
+Author-email: Your Name <you@example.com>
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: pymatgen
+Requires-Dist: ase
+Requires-Dist: mace-torch
+Requires-Dist: mace
+Requires-Dist: chemiscope
+Requires-Dist: tqdm
+
+# mc_structure_explorer
+
+Monte Carlo engine for structure exploration using Metropolis sampling.
+
+## Installation
+
+```bash
+pip install .
