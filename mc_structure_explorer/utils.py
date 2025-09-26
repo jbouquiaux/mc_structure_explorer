@@ -33,27 +33,24 @@ def compute_beta_sialon_z(structure):
     n_N  = sum(1 for s in structure if s.specie.symbol == "N")
     n_Eu = sum(1 for s in structure if s.specie.symbol == "Eu")
 
-    # β-Si3N4 formula unit has 6 Si + 8 N = 14 atoms per FU
-    n_atoms_FU = 14
-    n_FU = len(structure) / n_atoms_FU
 
-    # z is Al/O substitutions per FU
-    z_per_FU = n_Al / n_FU
+    z = n_Al/(n_Al+n_Si) * 6  # z per formula unit
+    y = n_Eu/(n_Al+n_Si) * 6  # Eu per formula unit
 
     # Check Eu charge compensation (expect 2 O removed per Eu)
-    expected_O = n_Al - 2 * n_Eu
-    if n_O != expected_O:
-        print(f"Warning: n_O={n_O}, expected {expected_O} based on {n_Eu} Eu interstitial(s)")
+    if n_Eu != 0:
+        expected_O = n_Al - 2 * n_Eu
+        if n_O != expected_O:
+            print(f"Warning: n_O={n_O}, expected {expected_O} based on {n_Eu} Eu interstitial(s)")
 
     return {
-        "z_per_FU": z_per_FU,
-        "n_FU": n_FU,
+        "z": z,
+        "y": y,
         "n_Al": n_Al,
         "n_O": n_O,
         "n_Si": n_Si,
         "n_N": n_N,
         "n_Eu": n_Eu,
-        "O_deficit_per_Eu": n_Al - n_O
     }
 
 
@@ -71,12 +68,12 @@ def generate_chemiscope_files(path, result):
     agg_scores = [frame["Al_O_aggregation_score"] for frame in result["trajectory"]]
     eu_scores = [frame["Eu_proximity_score"] for frame in result["trajectory"]]
 
-    e = (np.array(list_energies)) * 1000
+    e = (np.array(list_energies))
     list_ase = [AseAtomsAdaptor.get_atoms(stru) for stru in list_strus]
 
     properties = {
         "index": {"target": "structure", "values": np.arange(len(list_ase)), "description": "structure index"},
-        "energy per atom": {"target": "structure", "values": e, "units": "meV", "description": "potential energy (meV/atom)"},
+        "energy per atom": {"target": "structure", "values": e, "units": "eV", "description": "potential energy (eV/atom)"},
         "Al-O aggregation score": {"target": "structure", "values": np.array(agg_scores), "description": "average number of O neighbors per Al"},
 #        "Eu proximity score": {"target": "structure", "values": np.array(eu_scores), "description": "average proximity of Al/O to Eu"}
     }

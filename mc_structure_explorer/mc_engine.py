@@ -137,20 +137,24 @@ class MonteCarloEngine:
         st.replace(i, el_j)
         st.replace(j, el_i)
         return st
-
+    
     def propose_move(self, structure, rcut=3.0, bias_strength=1, eu_bias_strength=1,
-                    return_info=False, interstitial_move_prob=0.2):
+                    return_info=False, interstitial_move_prob=0.2, bias_on_plane=0):
         """
         Propose a single move: either displace Eu (interstitial move) or swap dopant ↔ host.
-        Adds bias for Al–O aggregation AND for O/Al proximity to Eu.
+        Biases:
+        - Al–O aggregation (bias_strength)
+        - O/Al proximity to Eu (eu_bias_strength)
+        - O/Al alignment in same z-plane as Eu (biais_on_plane)
 
         Args:
             structure (Structure): Current pymatgen Structure object.
-            rcut (float): Cutoff radius for neighbor counting (Å).
+            rcut (float): Cutoff distance for Al–O neighbors (Å).
             bias_strength (float): Bias strength toward Al–O aggregation.
             eu_bias_strength (float): Bias strength toward placing O/Al near Eu.
-            return_info (bool): If True, also returns move details for verbose output.
             interstitial_move_prob (float): Probability of choosing Eu displacement.
+            biais_on_plane (float): Strength of bias for Al/O to share same z-plane with Eu.
+            return_info (bool): If True, also returns move details.
 
         Returns:
             Structure or tuple: New structure (and move info if return_info=True).
@@ -194,8 +198,8 @@ class MonteCarloEngine:
         if not candidate_sites:
             return (st, None) if return_info else st
 
-        # Helper: count Al–O pairs around a site
-        def al_o_neighbors(site_idx, structure):
+        def al_o_neighbors(site_idx, structure, max_coord=4, rcut=3.0):
+            """Fraction of O neighbors per Al (normalized 0–1)."""
             s = structure[site_idx]
             neighbors = 0
             for j, other in enumerate(structure):
@@ -205,29 +209,46 @@ class MonteCarloEngine:
                 (s.specie.symbol == "O" and other.specie.symbol == "Al"):
                     if structure.get_distance(site_idx, j) <= rcut:
                         neighbors += 1
-            return neighbors
+            return min(neighbors, max_coord) / max_coord  # 0..1
 
-        # Helper: Eu bias — inverse distance of site to nearest Eu
+        # Helper: Eu proximity score normalized 0–1
         def eu_proximity(site_idx, structure, cutoff=5.0):
+            """Closer to Eu → higher score, normalized to 0..1."""
             eu_sites = [i for i, s in enumerate(structure) if s.specie.symbol == "Eu"]
             if not eu_sites:
                 return 0.0
             min_dist = min(structure.get_distance(site_idx, eu_idx) for eu_idx in eu_sites)
-            return 1.0 / (min_dist + 1e-6) if min_dist < cutoff else 0.0
+            return max(0.0, (cutoff - min_dist) / cutoff)  # 0 if at cutoff, 1 if Eu is on top
 
-        weights = []
-        neighbor_counts = []
-        eu_scores = []
+
+        # Helper: Eu plane alignment score
+        def eu_plane_score(site_idx, structure):
+            eu_sites = [i for i, s in enumerate(structure) if s.specie.symbol == "Eu"]
+            if not eu_sites or bias_on_plane <= 0:
+                return 1.0  # neutral if no Eu or no bias
+            z_site = structure[site_idx].frac_coords[2]
+            scores = []
+            for eu_idx in eu_sites:
+                z_eu = structure[eu_idx].frac_coords[2]
+                dz = abs(z_site - z_eu)
+                dz = min(dz, 1 - dz)  # periodic boundary
+                scores.append(np.exp(-bias_on_plane * dz**2))
+            return max(scores)
+
+        # Compute weights
+        weights, neighbor_counts, eu_scores, plane_scores = [], [], [], []
         for target_idx in candidate_sites:
             temp_st = self._swap_sites(st, idx, target_idx)
-            n_neighbors = al_o_neighbors(target_idx, temp_st)
-            eu_score = eu_proximity(target_idx, temp_st)
 
-            neighbor_counts.append(n_neighbors)
-            eu_scores.append(eu_score)
+            n_norm = al_o_neighbors(target_idx, temp_st)   # 0–1
+            eu_norm = eu_proximity(target_idx, temp_st)    # 0–1
+            plane_score = eu_plane_score(target_idx, temp_st)  # 0–1
 
-            # combined weight: Al–O bias * Eu bias
-            weight = np.exp(bias_strength * n_neighbors + eu_bias_strength * eu_score)
+            neighbor_counts.append(n_norm)
+            eu_scores.append(eu_norm)
+            plane_scores.append(plane_score)
+
+            weight = np.exp(bias_strength * n_norm + eu_bias_strength * eu_norm) * plane_score
             weights.append(weight)
 
         weights = np.array(weights)
@@ -237,6 +258,7 @@ class MonteCarloEngine:
         bias_weight = weights[candidate_sites.index(chosen_idx)]
         n_neighbors = neighbor_counts[candidate_sites.index(chosen_idx)]
         eu_score = eu_scores[candidate_sites.index(chosen_idx)]
+        plane_score = plane_scores[candidate_sites.index(chosen_idx)]
 
         new_st = self._swap_sites(st, idx, chosen_idx)
         move_info = {
@@ -247,14 +269,15 @@ class MonteCarloEngine:
             "to_element": host_symbol,
             "bias_weight": bias_weight,
             "al_o_neighbors": n_neighbors,
-            "eu_proximity": eu_score
+            "eu_proximity": eu_score,
+            "eu_plane_score": plane_score
         }
         return (new_st, move_info) if return_info else new_st
 
 
     def get_energy(self, struct):
         """
-        Compute the energy per atom for the given structure.
+        Compute the energy for the given structure.
 
         Args:
             struct (Structure): pymatgen Structure object.
@@ -265,11 +288,19 @@ class MonteCarloEngine:
         if self.calculation_type == "ewald":
             # Assign oxidation states for Ewald calculation
             struct.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
-            return self.ewald_model.get_energy(struct) / len(struct)
+            return self.ewald_model.get_energy(struct)
         elif self.calculation_type == "mace_small":
             atoms = AseAtomsAdaptor.get_atoms(struct)
             atoms.set_calculator(self.calc_mace)
-            return atoms.get_potential_energy() / len(atoms)
+            return atoms.get_potential_energy()
+        elif self.calculation_type == "mace_medium":
+            atoms = AseAtomsAdaptor.get_atoms(struct)
+            atoms.set_calculator(self.calc_mace)
+            return atoms.get_potential_energy()
+        elif self.calculation_type == "mace_large":
+            atoms = AseAtomsAdaptor.get_atoms(struct)
+            atoms.set_calculator(self.calc_mace)
+            return atoms.get_potential_energy()
         else:
             raise ValueError(f"Unknown calculation_type {self.calculation_type}")
 
@@ -324,6 +355,7 @@ class MonteCarloEngine:
         burn_frac=0.1,
         bias_strength=1.0,
         eu_bias_strength=1.0,
+        bias_on_plane=0,
         interstitial_move_prob=0.2,
         progress_callback=None,
         verbose=False,
@@ -339,6 +371,7 @@ class MonteCarloEngine:
             burn_frac (float): Fraction of trajectory to discard as burn-in.
             bias_strength (float): Strength of bias towards Al-O aggregation.
             eu_bias_strength (float): Strength of bias towards placing O/Al near Eu.
+            bias_on_plane (float): Strength of bias for Al/O to share same z-plane with Eu.
             verbose (bool): If True, print detailed info about each move.
             initial_structure (Structure or None): If provided, use this as the starting structure.
 
@@ -364,8 +397,8 @@ class MonteCarloEngine:
         z_info = compute_beta_sialon_z(current)
 
         if verbose:
-            print(f"z per formula unit: {z_info['z_per_FU']:.2f}")
-            print(f"Number of formula units in supercell: {z_info['n_FU']:.1f}")
+            print(f"z: {z_info['z']:.4f}")
+            print(f"y: {z_info['y']:.4f}")
             print(
                 f"Counts: "
                 f"Si={z_info['n_Si']}, "
@@ -376,20 +409,20 @@ class MonteCarloEngine:
             )
             print(f"Total number of atoms in supercell: {len(current)}")
 
-            if z_info["n_Eu"] > 0:
-                print(
-                    f"Eu charge compensation check: "
-                    f"O deficit per Eu = {z_info['O_deficit_per_Eu'] / z_info['n_Eu']:.2f} "
-                    f"(expected ~2)"
-                )
-            else:
-                print("No Eu interstitials in this structure.")
 
         E_current = self.get_energy(current)
         trajectory = []
         accepted = 0
         proposed = 0
-
+        
+        # Store initial guess before MC loop
+        trajectory.append({
+            "energy": E_current,
+            "structure": current.copy().as_dict(),
+            "Al_O_aggregation_score": self.al_o_aggregation_score(current, rcut=3.0),
+            "Eu_proximity_score": self.eu_proximity_score(current, cutoff=5.0),
+            "accepted": True
+        })
         for step in range(n_steps):
             if progress_callback is not None:
                 progress_callback(step)
@@ -400,7 +433,7 @@ class MonteCarloEngine:
             # Propose move with info
             proposal, move_info = self.propose_move(
                 current, rcut=3.0, bias_strength=bias_strength,
-                eu_bias_strength=eu_bias_strength,
+                eu_bias_strength=eu_bias_strength, bias_on_plane=bias_on_plane,
                 interstitial_move_prob=interstitial_move_prob,
                 return_info=True
             )
@@ -421,10 +454,11 @@ class MonteCarloEngine:
             if step % thin == 0:
                 # store instead as dict.
                 trajectory.append({
-                    "energy": E_current,
-                    "structure": current.copy().as_dict(),
+                    "energy": E_prop,
+                    "structure": proposal.copy().as_dict(),
                     "Al_O_aggregation_score": Al_O_aggregation_score,
-                    "Eu_proximity_score": Eu_proximity_score
+                    "Eu_proximity_score": Eu_proximity_score,
+                    "accepted": accepted_move
                 })
 
             # Verbose output
@@ -436,7 +470,9 @@ class MonteCarloEngine:
                         print(f"Proposed move:            Swap {move_info['from_element']} (site {move_info['from_idx']}) "
                               f"<-> {move_info['to_element']} (site {move_info['to_idx']})")
                         print(f"Al-O neighbors (post):    {move_info['al_o_neighbors']}")
+                        print(f"Eu proximity score:              {move_info['eu_proximity']:.4f}")
                         print(f"Bias weight:              {move_info['bias_weight']:.4f}")
+
                     elif move_info["type"] == "interstitial_move":
                         print(f"Proposed move:            Interstitial move of {move_info['element']} (site {move_info['site_idx']})")
                         print(f"Old fractional coords:    {move_info['old_frac']}")

@@ -46,7 +46,7 @@ def run_single_chain(seed, config, save_path=None, progress_callback=None, initi
     )
 
     # Temperature schedule
-    T_schedule = config["T_start"] * (config["T_end"]/config["T_start"]) ** (np.arange(config["n_steps"]) / config["n_steps"])
+    T_schedule = np.linspace(config["T_start"], config["T_end"], config["n_steps"])
 
     # Run MC chain
     mc_engine.run_chain(
@@ -56,6 +56,7 @@ def run_single_chain(seed, config, save_path=None, progress_callback=None, initi
         burn_frac=config["burn_frac"],
         bias_strength=config["bias_strength"],
         eu_bias_strength=config["eu_bias_strength"],
+        bias_on_plane=config["bias_on_plane"],
         interstitial_move_prob=config["eu_move_prob"],
         verbose=config["verbose"],
         progress_callback=progress_callback,
@@ -139,6 +140,9 @@ def main():
         mc_tmp = MonteCarloEngine(base_structure=base_struct, substitution_list=sub_list,
                                   interstitial_site=inter_site, seed=config["seed_global"])
         initial_struct = mc_tmp.generate_initial_structure()
+    
+    if config.get("initial_structure"):
+        initial_struct = Structure.from_file(config["initial_structure"])
 
     # Start multiprocessing chains
     queue = multiprocessing.Queue()
