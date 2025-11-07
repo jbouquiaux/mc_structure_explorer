@@ -11,7 +11,12 @@
   "burn_frac": 0.0,
   "bias_strength": 0.0,
   "eu_bias_strength": 0.0,
+  "bias_on_plane": 0.0,
   "eu_move_prob": 0.0,
+  "relax": true,
+  "relax_fmax": 0.1,
+  "relax_steps": 5,
+  "follow_relaxed": false,
   "base_structure_path": "/Users/jbouquiaux/softwares/mc_structure_explorer/tests/./prim.cif",
   "supercell_matrix": [
     [

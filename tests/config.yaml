@@ -17,7 +17,12 @@ thin: 1                    # Thinning interval for storing trajectory
 burn_frac: 0.0             # Fraction of trajectory to discard as burn-in
 bias_strength: 0.0         # Strength of bias toward Al-O aggregation
 eu_bias_strength: 0.0      # Strength of bias toward placing O/Al near Eu
+bias_on_plane: 0.0         # Strength of bias for Al/O to share same z-plane with Eu
 eu_move_prob: 0.0          # Probability of moving Eu in a step (0 = never, 1 = always)
+relax: true               # If true, relax structures before computing energy
+relax_fmax: 0.1            # Force convergence criterion for relaxation (eV/Å)
+relax_steps: 5           # Maximum number of relaxation steps
+follow_relaxed: false      # If true, propose moves from relaxed structure; if false, from unrelaxed
 
 # -------------------------
 # Structure and supercell

@@ -64,7 +64,22 @@ def save_config(config, path):
 
 def generate_chemiscope_files(path, result):
     list_energies = [frame["energy"] for frame in result["trajectory"]]
-    list_strus = [Structure.from_dict(frame["structure"]) for frame in result["trajectory"]]
+    
+    # Handle both old and new trajectory formats
+    list_strus = []
+    for frame in result["trajectory"]:
+        if "structure_relaxed" in frame:
+            # New format with relaxation: prefer relaxed structure
+            list_strus.append(Structure.from_dict(frame["structure_relaxed"]))
+        elif "structure" in frame:
+            # Old format without relaxation
+            list_strus.append(Structure.from_dict(frame["structure"]))
+        elif "structure_unrelaxed" in frame:
+            # New format but no relaxed structure available
+            list_strus.append(Structure.from_dict(frame["structure_unrelaxed"]))
+        else:
+            raise KeyError("No structure found in trajectory frame")
+    
     agg_scores = [frame["Al_O_aggregation_score"] for frame in result["trajectory"]]
     eu_scores = [frame["Eu_proximity_score"] for frame in result["trajectory"]]
 

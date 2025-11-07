@@ -275,34 +275,94 @@ class MonteCarloEngine:
         return (new_st, move_info) if return_info else new_st
 
 
-    def get_energy(self, struct):
+    def relax_structure(self, struct, fmax=0.1, steps=200):
+        """
+        Relax a structure using ASE's BFGS optimizer with cell relaxation (NPT).
+
+        Args:
+            struct (Structure): pymatgen Structure object to relax.
+            fmax (float): Convergence criterion (max force in eV/Å).
+            steps (int): Maximum number of relaxation steps.
+
+        Returns:
+            Structure: Relaxed pymatgen Structure object.
+        """
+        if self.calculation_type == "ewald":
+            # Ewald doesn't support relaxation; return structure as-is
+            return struct.copy()
+        
+        from ase.optimize import BFGS
+        from ase.constraints import UnitCellFilter
+        
+        atoms = AseAtomsAdaptor.get_atoms(struct)
+        
+        if self.calculation_type == "mace_small":
+            atoms.set_calculator(self.calc_mace)
+        elif self.calculation_type == "mace_medium":
+            atoms.set_calculator(self.calc_mace)
+        elif self.calculation_type == "mace_large":
+            atoms.set_calculator(self.calc_mace)
+        else:
+            raise ValueError(f"Cannot relax with calculation_type: {self.calculation_type}")
+        
+        # Use UnitCellFilter for variable cell relaxation (NPT)
+        ucf = UnitCellFilter(atoms, hydrostatic_strain=True)
+        dyn = BFGS(ucf, trajectory=None)
+        dyn.run(fmax=fmax, steps=steps)
+        
+        # Convert back to pymatgen Structure
+        relaxed_struct = AseAtomsAdaptor.get_structure(atoms)
+        return relaxed_struct
+
+    def get_energy(self, struct, relax=False, fmax=0.1, relax_steps=200):
         """
         Compute the energy for the given structure.
 
         Args:
             struct (Structure): pymatgen Structure object.
+            relax (bool): If True, relax structure before computing energy.
+            fmax (float): Convergence criterion for relaxation (eV/Å).
+            relax_steps (int): Maximum relaxation steps.
 
         Returns:
-            float: Energy per atom (eV).
+            float or dict: If relax=False, returns float (energy per atom in eV).
+                          If relax=True, returns dict with:
+                            - 'energy_unrelaxed': float
+                            - 'energy_relaxed': float
+                            - 'structure_relaxed': relaxed Structure object
         """
+        # Compute unrelaxed energy
         if self.calculation_type == "ewald":
-            # Assign oxidation states for Ewald calculation
-            struct.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
-            return self.ewald_model.get_energy(struct)
-        elif self.calculation_type == "mace_small":
+            struct_copy = struct.copy()
+            struct_copy.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
+            E_unrelaxed = self.ewald_model.get_energy(struct_copy)
+        elif self.calculation_type in ["mace_small", "mace_medium", "mace_large"]:
             atoms = AseAtomsAdaptor.get_atoms(struct)
             atoms.set_calculator(self.calc_mace)
-            return atoms.get_potential_energy()
-        elif self.calculation_type == "mace_medium":
-            atoms = AseAtomsAdaptor.get_atoms(struct)
-            atoms.set_calculator(self.calc_mace)
-            return atoms.get_potential_energy()
-        elif self.calculation_type == "mace_large":
-            atoms = AseAtomsAdaptor.get_atoms(struct)
-            atoms.set_calculator(self.calc_mace)
-            return atoms.get_potential_energy()
+            E_unrelaxed = atoms.get_potential_energy()
         else:
             raise ValueError(f"Unknown calculation_type {self.calculation_type}")
+        
+        if not relax:
+            return E_unrelaxed
+        
+        # If relaxation requested, relax and compute relaxed energy
+        struct_relaxed = self.relax_structure(struct, fmax=fmax, steps=relax_steps)
+        
+        if self.calculation_type == "ewald":
+            struct_relaxed_copy = struct_relaxed.copy()
+            struct_relaxed_copy.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
+            E_relaxed = self.ewald_model.get_energy(struct_relaxed_copy)
+        elif self.calculation_type in ["mace_small", "mace_medium", "mace_large"]:
+            atoms_relaxed = AseAtomsAdaptor.get_atoms(struct_relaxed)
+            atoms_relaxed.set_calculator(self.calc_mace)
+            E_relaxed = atoms_relaxed.get_potential_energy()
+        
+        return {
+            "energy_unrelaxed": E_unrelaxed,
+            "energy_relaxed": E_relaxed,
+            "structure_relaxed": struct_relaxed
+        }
 
     def al_o_aggregation_score(self, structure, rcut=3.0, max_coord=4):
         """
@@ -359,7 +419,11 @@ class MonteCarloEngine:
         interstitial_move_prob=0.2,
         progress_callback=None,
         verbose=False,
-        initial_structure=None  
+        initial_structure=None,
+        relax=False,
+        relax_fmax=0.1,
+        relax_steps=200,
+        follow_relaxed=False
     ):
         """
         Run a Metropolis Monte Carlo chain.
@@ -374,12 +438,21 @@ class MonteCarloEngine:
             bias_on_plane (float): Strength of bias for Al/O to share same z-plane with Eu.
             verbose (bool): If True, print detailed info about each move.
             initial_structure (Structure or None): If provided, use this as the starting structure.
+            relax (bool): If True, relax each structure before computing energy.
+            relax_fmax (float): Convergence criterion for relaxation (eV/Å).
+            relax_steps (int): Maximum relaxation steps.
+            follow_relaxed (bool): If True, propose moves from relaxed structure; if False, from unrelaxed.
 
         Returns:
             dict: Results including trajectory, acceptance ratio, and timing.
         """
         if verbose:
             print(f"Starting Metropolis chain with n_steps={n_steps}")
+            if relax:
+                print(f"Relaxation enabled: fmax={relax_fmax} eV/Å, max_steps={relax_steps}")
+                print(f"Follow relaxed structures: {follow_relaxed}")
+            else:
+                print("Relaxation disabled")
 
         start_time = time.time()
 
@@ -410,19 +483,39 @@ class MonteCarloEngine:
             print(f"Total number of atoms in supercell: {len(current)}")
 
 
-        E_current = self.get_energy(current)
+        # Compute initial energy
+        energy_result = self.get_energy(current, relax=relax, fmax=relax_fmax, relax_steps=relax_steps)
+        
+        if relax:
+            E_current = energy_result["energy_relaxed"]
+            E_current_unrelaxed = energy_result["energy_unrelaxed"]
+            current_relaxed = energy_result["structure_relaxed"]
+        else:
+            E_current = energy_result
+            E_current_unrelaxed = energy_result
+            current_relaxed = None
+        
         trajectory = []
         accepted = 0
         proposed = 0
         
         # Store initial guess before MC loop
-        trajectory.append({
-            "energy": E_current,
-            "structure": current.copy().as_dict(),
-            "Al_O_aggregation_score": self.al_o_aggregation_score(current, rcut=3.0),
-            "Eu_proximity_score": self.eu_proximity_score(current, cutoff=5.0),
+        initial_entry = {
+            "structure_unrelaxed": current.copy().as_dict(),
+            "Al_O_aggregation_score": self.al_o_aggregation_score(current_relaxed if current_relaxed is not None else current, rcut=3.0),
+            "Eu_proximity_score": self.eu_proximity_score(current_relaxed if current_relaxed is not None else current, cutoff=5.0),
             "accepted": True
-        })
+        }
+        if relax:
+            initial_entry["energy_unrelaxed"] = energy_result["energy_unrelaxed"]
+            initial_entry["energy_relaxed"] = energy_result["energy_relaxed"]
+            initial_entry["structure_relaxed"] = current_relaxed.copy().as_dict()
+            initial_entry["energy"] = energy_result["energy_relaxed"]
+        else:
+            initial_entry["energy"] = E_current
+            initial_entry["structure"] = current.copy().as_dict()
+        trajectory.append(initial_entry)
+        
         for step in range(n_steps):
             if progress_callback is not None:
                 progress_callback(step)
@@ -430,39 +523,71 @@ class MonteCarloEngine:
             proposed += 1
             t_prop_start = time.time()
 
+            # Propose move from either relaxed or unrelaxed structure
+            if relax and follow_relaxed and current_relaxed is not None:
+                proposal_base = current_relaxed
+            else:
+                proposal_base = current
+            
             # Propose move with info
             proposal, move_info = self.propose_move(
-                current, rcut=3.0, bias_strength=bias_strength,
+                proposal_base, rcut=3.0, bias_strength=bias_strength,
                 eu_bias_strength=eu_bias_strength, bias_on_plane=bias_on_plane,
                 interstitial_move_prob=interstitial_move_prob,
                 return_info=True
             )
-            E_prop = self.get_energy(proposal)
-            Al_O_aggregation_score = self.al_o_aggregation_score(current, rcut=3.0)
-            Eu_proximity_score = self.eu_proximity_score(current, cutoff=5.0)
+            
+            # Compute energy of proposal
+            if verbose:
+                print(f"Proposing move at step {step}...")
+                if relax:
+                    print("Relaxing proposed structure for energy evaluation...")
+            energy_result_prop = self.get_energy(proposal, relax=relax, fmax=relax_fmax, relax_steps=relax_steps)
+            
+            if relax:
+                E_prop = energy_result_prop["energy_relaxed"]
+                E_prop_unrelaxed = energy_result_prop["energy_unrelaxed"]
+                proposal_relaxed = energy_result_prop["structure_relaxed"]
+            else:
+                E_prop = energy_result_prop
+                E_prop_unrelaxed = energy_result_prop
+                proposal_relaxed = None
+            
+            Al_O_aggregation_score = self.al_o_aggregation_score(proposal_relaxed if proposal_relaxed is not None else proposal, rcut=3.0)
+            Eu_proximity_score = self.eu_proximity_score(proposal_relaxed if proposal_relaxed is not None else proposal, cutoff=5.0)
             t_prop_end = time.time()
             dE = E_prop - E_current
             accepted_move = False
 
-            # Metropolis acceptance criterion
+            # Metropolis acceptance criterion (using relaxed energies if relax=True)
             if dE <= 0.0 or random.random() < np.exp(-dE / T_eff):
                 current = proposal
                 E_current = E_prop
+                E_current_unrelaxed = E_prop_unrelaxed
+                current_relaxed = proposal_relaxed
                 accepted += 1
                 accepted_move = True
 
             if step % thin == 0:
-                # store instead as dict.
-                trajectory.append({
-                    "energy": E_prop,
-                    "structure": proposal.copy().as_dict(),
+                # Store trajectory entry with both relaxed and unrelaxed info
+                entry = {
+                    "structure_unrelaxed": proposal.copy().as_dict(),
                     "Al_O_aggregation_score": Al_O_aggregation_score,
                     "Eu_proximity_score": Eu_proximity_score,
                     "accepted": accepted_move
-                })
+                }
+                if relax:
+                    entry["energy_unrelaxed"] = energy_result_prop["energy_unrelaxed"]
+                    entry["energy_relaxed"] = energy_result_prop["energy_relaxed"]
+                    entry["structure_relaxed"] = proposal_relaxed.copy().as_dict()
+                    entry["energy"] = E_prop  # relaxed energy for main tracking
+                else:
+                    entry["energy"] = E_prop
+                    entry["structure"] = proposal.copy().as_dict()
+                trajectory.append(entry)
 
             # Verbose output
-            if verbose and step % max(1, n_steps // 100) == 0:
+            if verbose: #and step % max(1, n_steps // 100) == 0:
                 print(f"\n--- Step {step} ---")
                 print(f"Temperature (T_eff):      {T_eff:.4f} eV")
                 if move_info is not None:
@@ -479,7 +604,14 @@ class MonteCarloEngine:
                         print(f"New fractional coords:    {move_info['new_frac']}")
                 else:
                     print("Proposed move:            None")
-                print(f"Proposed energy:          {E_prop:.4f} eV")
+                
+                if relax:
+                    print(f"Proposed energy (unrelaxed): {energy_result_prop['energy_unrelaxed']:.4f} eV")
+                    print(f"Proposed energy (relaxed):   {energy_result_prop['energy_relaxed']:.4f} eV")
+                    print(f"Relaxation energy change: {energy_result_prop['energy_relaxed'] - energy_result_prop['energy_unrelaxed']:.4f} eV")
+                else:
+                    print(f"Proposed energy:          {E_prop:.4f} eV")
+                
                 print(f"Current energy:           {E_current:.4f} eV")
                 print(f"ΔE:                       {dE:.4f} eV")
                 print(f"Move accepted:            {accepted_move}")
@@ -499,8 +631,17 @@ class MonteCarloEngine:
             "thin": thin,
             "burn_frac": burn_frac,
             "bias_strength": bias_strength,
+            "eu_bias_strength": eu_bias_strength,
+            "bias_on_plane": bias_on_plane,
+            "interstitial_move_prob": interstitial_move_prob,
             "calculation_type": self.calculation_type,
+            "relax": relax,
+            "relax_fmax": relax_fmax,
+            "relax_steps": relax_steps,
+            "follow_relaxed": follow_relaxed,
             "verbose": verbose,
+            "T_start": T_schedule[0],
+            "T_end": T_schedule[-1],
         }
 
         results = {

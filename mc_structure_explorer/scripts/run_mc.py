@@ -60,7 +60,11 @@ def run_single_chain(seed, config, save_path=None, progress_callback=None, initi
         interstitial_move_prob=config["eu_move_prob"],
         verbose=config["verbose"],
         progress_callback=progress_callback,
-        initial_structure=initial_structure
+        initial_structure=initial_structure,
+        relax=config.get("relax", False),
+        relax_fmax=config.get("relax_fmax", 0.1),
+        relax_steps=config.get("relax_steps", 200),
+        follow_relaxed=config.get("follow_relaxed", False)
     )
 
     # Save results
