@@ -10,3 +10,5 @@ mc_structure_explorer.egg-info/dependency_links.txt
 mc_structure_explorer.egg-info/entry_points.txt
 mc_structure_explorer.egg-info/requires.txt
 mc_structure_explorer.egg-info/top_level.txt
+mc_structure_explorer/scripts/__init__.py
+mc_structure_explorer/scripts/run_mc.py

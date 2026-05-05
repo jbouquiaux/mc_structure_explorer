@@ -5,7 +5,7 @@ from pymatgen.analysis.energy_models import EwaldElectrostaticModel
 from pymatgen.io.ase import AseAtomsAdaptor
 from mace.calculators import mace_mp
 import json
-from mc.utils import compute_beta_sialon_z
+from mc_structure_explorer.utils import compute_beta_sialon_z
 
 class MonteCarloEngine:
     """
@@ -61,36 +61,103 @@ class MonteCarloEngine:
         if self.seed is not None:
             random.seed(self.seed)
         self.results = None
+        
+        # Track frozen sites (dopants that existed in input structure)
+        self.frozen_indices = set()
 
     def generate_initial_structure(self):
         """
         Generate a random initial structure with the specified dopants.
+        
+        If the input structure already contains some dopants, only the additional
+        substitutions needed to reach the target counts are performed.
+        Existing dopants are marked as frozen and will not move during MC sampling.
 
         Returns:
             Structure: pymatgen Structure object with substitutions applied.
         """
         stru = self.base_structure.copy()
-        indices_by_element = {}
+        
+        # Identify dopant elements we're looking for
+        dopant_elements = set(sub["dopant_atom"] for sub in self.substitution_list)
+        
+        # Mark existing dopants as frozen (they won't move during MC)
+        self.frozen_indices = set()
+        for i, site in enumerate(stru.sites):
+            if site.specie.symbol in dopant_elements:
+                self.frozen_indices.add(i)
+        
+        # Count existing dopants in the input structure
+        existing_counts = {}
+        for site in stru.sites:
+            el = site.specie.symbol
+            existing_counts[el] = existing_counts.get(el, 0) + 1
+        
+        # Determine which substitutions still need to be made
+        # Group substitutions by (replaced_atom, dopant_atom) pair
+        substitution_targets = {}
+        for sub in self.substitution_list:
+            key = (sub["replaced_atom"], sub["dopant_atom"])
+            substitution_targets[key] = substitution_targets.get(key, 0) + 1
+        
+        # Calculate how many additional substitutions are needed
+        remaining_substitutions = []
+        for (replaced, dopant), target_count in substitution_targets.items():
+            current_dopant_count = existing_counts.get(dopant, 0)
+            additional_needed = target_count - current_dopant_count
+            
+            if additional_needed < 0:
+                raise ValueError(
+                    f"Input structure has {current_dopant_count} {dopant} atoms, "
+                    f"but only {target_count} requested. Cannot remove existing dopants."
+                )
+            
+            # Add the remaining substitutions needed
+            for _ in range(additional_needed):
+                remaining_substitutions.append({"replaced_atom": replaced, "dopant_atom": dopant})
+        
         # Map each element to its site indices
+        indices_by_element = {}
         for i, site in enumerate(stru.sites):
             el = site.specie.symbol
             indices_by_element.setdefault(el, []).append(i)
+        
         chosen_indices = set()
-        # Apply substitutions
-        for sub in self.substitution_list:
+        
+        # Apply only the remaining substitutions
+        for sub in remaining_substitutions:
             replaced, dopant = sub["replaced_atom"], sub["dopant_atom"]
             avail = [idx for idx in indices_by_element.get(replaced, []) if idx not in chosen_indices]
             if not avail:
-                raise RuntimeError(f"No available site for {replaced}")
+                raise RuntimeError(
+                    f"No available {replaced} site for substitution with {dopant}. "
+                    f"Current structure may already have the target composition."
+                )
             idx = random.choice(avail)
             chosen_indices.add(idx)
             stru.replace(idx, dopant)
+            
+            # Update indices_by_element to reflect the change
+            indices_by_element[replaced].remove(idx)
+            indices_by_element.setdefault(dopant, []).append(idx)
 
-        # Add interstitial atoms if defined at init
+        # Handle interstitial atoms
         if self.interstitial:
             element = list(self.interstitial.keys())[0]
             coords = self.interstitial[element]
-            stru.append(element, coords, coords_are_cartesian=False)
+            
+            # Check if interstitial already exists
+            existing_interstitial_count = existing_counts.get(element, 0)
+            
+            # Only add if not already present
+            if existing_interstitial_count == 0:
+                stru.append(element, coords, coords_are_cartesian=False)
+            else:
+                # If already present, mark existing interstitial as frozen
+                for i, site in enumerate(stru.sites):
+                    if site.specie.symbol == element:
+                        self.frozen_indices.add(i)
+        
         return stru
 
     def _count_element(self, structure, symbol):
@@ -137,20 +204,24 @@ class MonteCarloEngine:
         st.replace(i, el_j)
         st.replace(j, el_i)
         return st
-
+    
     def propose_move(self, structure, rcut=3.0, bias_strength=1, eu_bias_strength=1,
-                    return_info=False, interstitial_move_prob=0.2):
+                    return_info=False, interstitial_move_prob=0.2, bias_on_plane=0):
         """
         Propose a single move: either displace Eu (interstitial move) or swap dopant ↔ host.
-        Adds bias for Al–O aggregation AND for O/Al proximity to Eu.
+        Biases:
+        - Al–O aggregation (bias_strength)
+        - O/Al proximity to Eu (eu_bias_strength)
+        - O/Al alignment in same z-plane as Eu (biais_on_plane)
 
         Args:
             structure (Structure): Current pymatgen Structure object.
-            rcut (float): Cutoff radius for neighbor counting (Å).
+            rcut (float): Cutoff distance for Al–O neighbors (Å).
             bias_strength (float): Bias strength toward Al–O aggregation.
             eu_bias_strength (float): Bias strength toward placing O/Al near Eu.
-            return_info (bool): If True, also returns move details for verbose output.
             interstitial_move_prob (float): Probability of choosing Eu displacement.
+            biais_on_plane (float): Strength of bias for Al/O to share same z-plane with Eu.
+            return_info (bool): If True, also returns move details.
 
         Returns:
             Structure or tuple: New structure (and move info if return_info=True).
@@ -161,7 +232,9 @@ class MonteCarloEngine:
         # ---- Interstitial move (Eu displacement) ----
         if self.interstitial and random.random() < interstitial_move_prob:
             element = list(self.interstitial.keys())[0]  # assume only Eu for now
-            indices = [i for i, site in enumerate(st) if site.specie.symbol == element]
+            # Only consider non-frozen interstitials for movement
+            indices = [i for i, site in enumerate(st) 
+                      if site.specie.symbol == element and i not in self.frozen_indices]
             if indices:
                 idx = random.choice(indices)
                 old_frac = st[idx].frac_coords.copy()
@@ -184,7 +257,8 @@ class MonteCarloEngine:
             dopant = sub["dopant_atom"]
             host = sub["replaced_atom"]
             for i, site in enumerate(st):
-                if site.specie.symbol == dopant:
+                # Skip frozen sites (dopants that existed in input structure)
+                if site.specie.symbol == dopant and i not in self.frozen_indices:
                     dopant_sites.append((i, dopant, host))
         if not dopant_sites:
             return (st, None) if return_info else st
@@ -194,8 +268,8 @@ class MonteCarloEngine:
         if not candidate_sites:
             return (st, None) if return_info else st
 
-        # Helper: count Al–O pairs around a site
-        def al_o_neighbors(site_idx, structure):
+        def al_o_neighbors(site_idx, structure, max_coord=4, rcut=3.0):
+            """Fraction of O neighbors per Al (normalized 0–1)."""
             s = structure[site_idx]
             neighbors = 0
             for j, other in enumerate(structure):
@@ -205,29 +279,46 @@ class MonteCarloEngine:
                 (s.specie.symbol == "O" and other.specie.symbol == "Al"):
                     if structure.get_distance(site_idx, j) <= rcut:
                         neighbors += 1
-            return neighbors
+            return min(neighbors, max_coord) / max_coord  # 0..1
 
-        # Helper: Eu bias — inverse distance of site to nearest Eu
+        # Helper: Eu proximity score normalized 0–1
         def eu_proximity(site_idx, structure, cutoff=5.0):
+            """Closer to Eu → higher score, normalized to 0..1."""
             eu_sites = [i for i, s in enumerate(structure) if s.specie.symbol == "Eu"]
             if not eu_sites:
                 return 0.0
             min_dist = min(structure.get_distance(site_idx, eu_idx) for eu_idx in eu_sites)
-            return 1.0 / (min_dist + 1e-6) if min_dist < cutoff else 0.0
+            return max(0.0, (cutoff - min_dist) / cutoff)  # 0 if at cutoff, 1 if Eu is on top
 
-        weights = []
-        neighbor_counts = []
-        eu_scores = []
+
+        # Helper: Eu plane alignment score
+        def eu_plane_score(site_idx, structure):
+            eu_sites = [i for i, s in enumerate(structure) if s.specie.symbol == "Eu"]
+            if not eu_sites or bias_on_plane <= 0:
+                return 1.0  # neutral if no Eu or no bias
+            z_site = structure[site_idx].frac_coords[2]
+            scores = []
+            for eu_idx in eu_sites:
+                z_eu = structure[eu_idx].frac_coords[2]
+                dz = abs(z_site - z_eu)
+                dz = min(dz, 1 - dz)  # periodic boundary
+                scores.append(np.exp(-bias_on_plane * dz**2))
+            return max(scores)
+
+        # Compute weights
+        weights, neighbor_counts, eu_scores, plane_scores = [], [], [], []
         for target_idx in candidate_sites:
             temp_st = self._swap_sites(st, idx, target_idx)
-            n_neighbors = al_o_neighbors(target_idx, temp_st)
-            eu_score = eu_proximity(target_idx, temp_st)
 
-            neighbor_counts.append(n_neighbors)
-            eu_scores.append(eu_score)
+            n_norm = al_o_neighbors(target_idx, temp_st)   # 0–1
+            eu_norm = eu_proximity(target_idx, temp_st)    # 0–1
+            plane_score = eu_plane_score(target_idx, temp_st)  # 0–1
 
-            # combined weight: Al–O bias * Eu bias
-            weight = np.exp(bias_strength * n_neighbors + eu_bias_strength * eu_score)
+            neighbor_counts.append(n_norm)
+            eu_scores.append(eu_norm)
+            plane_scores.append(plane_score)
+
+            weight = np.exp(bias_strength * n_norm + eu_bias_strength * eu_norm) * plane_score
             weights.append(weight)
 
         weights = np.array(weights)
@@ -237,6 +328,7 @@ class MonteCarloEngine:
         bias_weight = weights[candidate_sites.index(chosen_idx)]
         n_neighbors = neighbor_counts[candidate_sites.index(chosen_idx)]
         eu_score = eu_scores[candidate_sites.index(chosen_idx)]
+        plane_score = plane_scores[candidate_sites.index(chosen_idx)]
 
         new_st = self._swap_sites(st, idx, chosen_idx)
         move_info = {
@@ -247,31 +339,100 @@ class MonteCarloEngine:
             "to_element": host_symbol,
             "bias_weight": bias_weight,
             "al_o_neighbors": n_neighbors,
-            "eu_proximity": eu_score
+            "eu_proximity": eu_score,
+            "eu_plane_score": plane_score
         }
         return (new_st, move_info) if return_info else new_st
 
 
-    def get_energy(self, struct):
+    def relax_structure(self, struct, fmax=0.1, steps=200):
         """
-        Compute the energy per atom for the given structure.
+        Relax a structure using ASE's BFGS optimizer with cell relaxation (NPT).
+
+        Args:
+            struct (Structure): pymatgen Structure object to relax.
+            fmax (float): Convergence criterion (max force in eV/Å).
+            steps (int): Maximum number of relaxation steps.
+
+        Returns:
+            Structure: Relaxed pymatgen Structure object.
+        """
+        if self.calculation_type == "ewald":
+            # Ewald doesn't support relaxation; return structure as-is
+            return struct.copy()
+        
+        from ase.optimize import BFGS
+        from ase.constraints import UnitCellFilter
+        
+        atoms = AseAtomsAdaptor.get_atoms(struct)
+        
+        if self.calculation_type == "mace_small":
+            atoms.set_calculator(self.calc_mace)
+        elif self.calculation_type == "mace_medium":
+            atoms.set_calculator(self.calc_mace)
+        elif self.calculation_type == "mace_large":
+            atoms.set_calculator(self.calc_mace)
+        else:
+            raise ValueError(f"Cannot relax with calculation_type: {self.calculation_type}")
+        
+        # Use UnitCellFilter for variable cell relaxation (NPT)
+        ucf = UnitCellFilter(atoms, hydrostatic_strain=True)
+        dyn = BFGS(ucf, trajectory=None)
+        dyn.run(fmax=fmax, steps=steps)
+        
+        # Convert back to pymatgen Structure
+        relaxed_struct = AseAtomsAdaptor.get_structure(atoms)
+        return relaxed_struct
+
+    def get_energy(self, struct, relax=False, fmax=0.1, relax_steps=200):
+        """
+        Compute the energy for the given structure.
 
         Args:
             struct (Structure): pymatgen Structure object.
+            relax (bool): If True, relax structure before computing energy.
+            fmax (float): Convergence criterion for relaxation (eV/Å).
+            relax_steps (int): Maximum relaxation steps.
 
         Returns:
-            float: Energy per atom (eV).
+            float or dict: If relax=False, returns float (energy per atom in eV).
+                          If relax=True, returns dict with:
+                            - 'energy_unrelaxed': float
+                            - 'energy_relaxed': float
+                            - 'structure_relaxed': relaxed Structure object
         """
+        # Compute unrelaxed energy
         if self.calculation_type == "ewald":
-            # Assign oxidation states for Ewald calculation
-            struct.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
-            return self.ewald_model.get_energy(struct) / len(struct)
-        elif self.calculation_type == "mace_small":
+            struct_copy = struct.copy()
+            struct_copy.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
+            E_unrelaxed = self.ewald_model.get_energy(struct_copy)
+        elif self.calculation_type in ["mace_small", "mace_medium", "mace_large"]:
             atoms = AseAtomsAdaptor.get_atoms(struct)
             atoms.set_calculator(self.calc_mace)
-            return atoms.get_potential_energy() / len(atoms)
+            E_unrelaxed = atoms.get_potential_energy()
         else:
             raise ValueError(f"Unknown calculation_type {self.calculation_type}")
+        
+        if not relax:
+            return E_unrelaxed
+        
+        # If relaxation requested, relax and compute relaxed energy
+        struct_relaxed = self.relax_structure(struct, fmax=fmax, steps=relax_steps)
+        
+        if self.calculation_type == "ewald":
+            struct_relaxed_copy = struct_relaxed.copy()
+            struct_relaxed_copy.add_oxidation_state_by_element({"Eu": 2, "Si": 4, "Al": 3, "N": -3, "O": -2})
+            E_relaxed = self.ewald_model.get_energy(struct_relaxed_copy)
+        elif self.calculation_type in ["mace_small", "mace_medium", "mace_large"]:
+            atoms_relaxed = AseAtomsAdaptor.get_atoms(struct_relaxed)
+            atoms_relaxed.set_calculator(self.calc_mace)
+            E_relaxed = atoms_relaxed.get_potential_energy()
+        
+        return {
+            "energy_unrelaxed": E_unrelaxed,
+            "energy_relaxed": E_relaxed,
+            "structure_relaxed": struct_relaxed
+        }
 
     def al_o_aggregation_score(self, structure, rcut=3.0, max_coord=4):
         """
@@ -324,10 +485,15 @@ class MonteCarloEngine:
         burn_frac=0.1,
         bias_strength=1.0,
         eu_bias_strength=1.0,
+        bias_on_plane=0,
         interstitial_move_prob=0.2,
         progress_callback=None,
         verbose=False,
-        initial_structure=None  
+        initial_structure=None,
+        relax=False,
+        relax_fmax=0.1,
+        relax_steps=200,
+        follow_relaxed=False
     ):
         """
         Run a Metropolis Monte Carlo chain.
@@ -339,14 +505,24 @@ class MonteCarloEngine:
             burn_frac (float): Fraction of trajectory to discard as burn-in.
             bias_strength (float): Strength of bias towards Al-O aggregation.
             eu_bias_strength (float): Strength of bias towards placing O/Al near Eu.
+            bias_on_plane (float): Strength of bias for Al/O to share same z-plane with Eu.
             verbose (bool): If True, print detailed info about each move.
             initial_structure (Structure or None): If provided, use this as the starting structure.
+            relax (bool): If True, relax each structure before computing energy.
+            relax_fmax (float): Convergence criterion for relaxation (eV/Å).
+            relax_steps (int): Maximum relaxation steps.
+            follow_relaxed (bool): If True, propose moves from relaxed structure; if False, from unrelaxed.
 
         Returns:
             dict: Results including trajectory, acceptance ratio, and timing.
         """
         if verbose:
             print(f"Starting Metropolis chain with n_steps={n_steps}")
+            if relax:
+                print(f"Relaxation enabled: fmax={relax_fmax} eV/Å, max_steps={relax_steps}")
+                print(f"Follow relaxed structures: {follow_relaxed}")
+            else:
+                print("Relaxation disabled")
 
         start_time = time.time()
 
@@ -364,8 +540,8 @@ class MonteCarloEngine:
         z_info = compute_beta_sialon_z(current)
 
         if verbose:
-            print(f"z per formula unit: {z_info['z_per_FU']:.2f}")
-            print(f"Number of formula units in supercell: {z_info['n_FU']:.1f}")
+            print(f"z: {z_info['z']:.4f}")
+            print(f"y: {z_info['y']:.4f}")
             print(
                 f"Counts: "
                 f"Si={z_info['n_Si']}, "
@@ -375,21 +551,53 @@ class MonteCarloEngine:
                 f"Eu={z_info['n_Eu']}"
             )
             print(f"Total number of atoms in supercell: {len(current)}")
-
-            if z_info["n_Eu"] > 0:
-                print(
-                    f"Eu charge compensation check: "
-                    f"O deficit per Eu = {z_info['O_deficit_per_Eu'] / z_info['n_Eu']:.2f} "
-                    f"(expected ~2)"
-                )
+            
+            # Report frozen sites
+            if self.frozen_indices:
+                print(f"\nFrozen sites (will not move during MC): {len(self.frozen_indices)} sites")
+                frozen_elements = {}
+                for idx in self.frozen_indices:
+                    el = current[idx].specie.symbol
+                    frozen_elements[el] = frozen_elements.get(el, 0) + 1
+                for el, count in sorted(frozen_elements.items()):
+                    print(f"  - {count} {el} atoms frozen")
             else:
-                print("No Eu interstitials in this structure.")
+                print("\nNo frozen sites - all dopants can move during MC")
 
-        E_current = self.get_energy(current)
+
+        # Compute initial energy
+        energy_result = self.get_energy(current, relax=relax, fmax=relax_fmax, relax_steps=relax_steps)
+        
+        if relax:
+            E_current = energy_result["energy_relaxed"]
+            E_current_unrelaxed = energy_result["energy_unrelaxed"]
+            current_relaxed = energy_result["structure_relaxed"]
+        else:
+            E_current = energy_result
+            E_current_unrelaxed = energy_result
+            current_relaxed = None
+        
         trajectory = []
         accepted = 0
         proposed = 0
-
+        
+        # Store initial guess before MC loop
+        initial_entry = {
+            "structure_unrelaxed": current.copy().as_dict(),
+            "Al_O_aggregation_score": self.al_o_aggregation_score(current_relaxed if current_relaxed is not None else current, rcut=3.0),
+            "Eu_proximity_score": self.eu_proximity_score(current_relaxed if current_relaxed is not None else current, cutoff=5.0),
+            "accepted": True
+        }
+        if relax:
+            initial_entry["energy_unrelaxed"] = energy_result["energy_unrelaxed"]
+            initial_entry["energy_relaxed"] = energy_result["energy_relaxed"]
+            initial_entry["structure_relaxed"] = current_relaxed.copy().as_dict()
+            initial_entry["energy"] = energy_result["energy_relaxed"]
+        else:
+            initial_entry["energy"] = E_current
+            initial_entry["structure"] = current.copy().as_dict()
+        trajectory.append(initial_entry)
+        
         for step in range(n_steps):
             if progress_callback is not None:
                 progress_callback(step)
@@ -397,38 +605,71 @@ class MonteCarloEngine:
             proposed += 1
             t_prop_start = time.time()
 
+            # Propose move from either relaxed or unrelaxed structure
+            if relax and follow_relaxed and current_relaxed is not None:
+                proposal_base = current_relaxed
+            else:
+                proposal_base = current
+            
             # Propose move with info
             proposal, move_info = self.propose_move(
-                current, rcut=3.0, bias_strength=bias_strength,
-                eu_bias_strength=eu_bias_strength,
+                proposal_base, rcut=3.0, bias_strength=bias_strength,
+                eu_bias_strength=eu_bias_strength, bias_on_plane=bias_on_plane,
                 interstitial_move_prob=interstitial_move_prob,
                 return_info=True
             )
-            E_prop = self.get_energy(proposal)
-            Al_O_aggregation_score = self.al_o_aggregation_score(current, rcut=3.0)
-            Eu_proximity_score = self.eu_proximity_score(current, cutoff=5.0)
+            
+            # Compute energy of proposal
+            if verbose:
+                print(f"Proposing move at step {step}...")
+                if relax:
+                    print("Relaxing proposed structure for energy evaluation...")
+            energy_result_prop = self.get_energy(proposal, relax=relax, fmax=relax_fmax, relax_steps=relax_steps)
+            
+            if relax:
+                E_prop = energy_result_prop["energy_relaxed"]
+                E_prop_unrelaxed = energy_result_prop["energy_unrelaxed"]
+                proposal_relaxed = energy_result_prop["structure_relaxed"]
+            else:
+                E_prop = energy_result_prop
+                E_prop_unrelaxed = energy_result_prop
+                proposal_relaxed = None
+            
+            Al_O_aggregation_score = self.al_o_aggregation_score(proposal_relaxed if proposal_relaxed is not None else proposal, rcut=3.0)
+            Eu_proximity_score = self.eu_proximity_score(proposal_relaxed if proposal_relaxed is not None else proposal, cutoff=5.0)
             t_prop_end = time.time()
             dE = E_prop - E_current
             accepted_move = False
 
-            # Metropolis acceptance criterion
+            # Metropolis acceptance criterion (using relaxed energies if relax=True)
             if dE <= 0.0 or random.random() < np.exp(-dE / T_eff):
                 current = proposal
                 E_current = E_prop
+                E_current_unrelaxed = E_prop_unrelaxed
+                current_relaxed = proposal_relaxed
                 accepted += 1
                 accepted_move = True
 
             if step % thin == 0:
-                # store instead as dict.
-                trajectory.append({
-                    "energy": E_current,
-                    "structure": current.copy().as_dict(),
+                # Store trajectory entry with both relaxed and unrelaxed info
+                entry = {
+                    "structure_unrelaxed": proposal.copy().as_dict(),
                     "Al_O_aggregation_score": Al_O_aggregation_score,
-                    "Eu_proximity_score": Eu_proximity_score
-                })
+                    "Eu_proximity_score": Eu_proximity_score,
+                    "accepted": accepted_move
+                }
+                if relax:
+                    entry["energy_unrelaxed"] = energy_result_prop["energy_unrelaxed"]
+                    entry["energy_relaxed"] = energy_result_prop["energy_relaxed"]
+                    entry["structure_relaxed"] = proposal_relaxed.copy().as_dict()
+                    entry["energy"] = E_prop  # relaxed energy for main tracking
+                else:
+                    entry["energy"] = E_prop
+                    entry["structure"] = proposal.copy().as_dict()
+                trajectory.append(entry)
 
             # Verbose output
-            if verbose and step % max(1, n_steps // 100) == 0:
+            if verbose: #and step % max(1, n_steps // 100) == 0:
                 print(f"\n--- Step {step} ---")
                 print(f"Temperature (T_eff):      {T_eff:.4f} eV")
                 if move_info is not None:
@@ -436,14 +677,23 @@ class MonteCarloEngine:
                         print(f"Proposed move:            Swap {move_info['from_element']} (site {move_info['from_idx']}) "
                               f"<-> {move_info['to_element']} (site {move_info['to_idx']})")
                         print(f"Al-O neighbors (post):    {move_info['al_o_neighbors']}")
+                        print(f"Eu proximity score:              {move_info['eu_proximity']:.4f}")
                         print(f"Bias weight:              {move_info['bias_weight']:.4f}")
+
                     elif move_info["type"] == "interstitial_move":
                         print(f"Proposed move:            Interstitial move of {move_info['element']} (site {move_info['site_idx']})")
                         print(f"Old fractional coords:    {move_info['old_frac']}")
                         print(f"New fractional coords:    {move_info['new_frac']}")
                 else:
                     print("Proposed move:            None")
-                print(f"Proposed energy:          {E_prop:.4f} eV")
+                
+                if relax:
+                    print(f"Proposed energy (unrelaxed): {energy_result_prop['energy_unrelaxed']:.4f} eV")
+                    print(f"Proposed energy (relaxed):   {energy_result_prop['energy_relaxed']:.4f} eV")
+                    print(f"Relaxation energy change: {energy_result_prop['energy_relaxed'] - energy_result_prop['energy_unrelaxed']:.4f} eV")
+                else:
+                    print(f"Proposed energy:          {E_prop:.4f} eV")
+                
                 print(f"Current energy:           {E_current:.4f} eV")
                 print(f"ΔE:                       {dE:.4f} eV")
                 print(f"Move accepted:            {accepted_move}")
@@ -463,8 +713,17 @@ class MonteCarloEngine:
             "thin": thin,
             "burn_frac": burn_frac,
             "bias_strength": bias_strength,
+            "eu_bias_strength": eu_bias_strength,
+            "bias_on_plane": bias_on_plane,
+            "interstitial_move_prob": interstitial_move_prob,
             "calculation_type": self.calculation_type,
+            "relax": relax,
+            "relax_fmax": relax_fmax,
+            "relax_steps": relax_steps,
+            "follow_relaxed": follow_relaxed,
             "verbose": verbose,
+            "T_start": T_schedule[0],
+            "T_end": T_schedule[-1],
         }
 
         results = {

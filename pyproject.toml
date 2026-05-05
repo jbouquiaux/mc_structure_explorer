@@ -7,7 +7,7 @@ name = "mc_structure_explorer"
 version = "0.1.0"
 description = "Monte Carlo engine for structure exploration using Metropolis sampling"
 authors = [
-    {name="Your Name", email="you@example.com"}
+    {name="Julien Bouquiaux", email="julien.bouquiaux@hotmail.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -17,7 +17,6 @@ dependencies = [
     "pymatgen",
     "ase",
     "mace-torch",
-    "mace",
     "chemiscope",
     "tqdm"
 ]

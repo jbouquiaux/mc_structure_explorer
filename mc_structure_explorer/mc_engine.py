@@ -61,36 +61,103 @@ class MonteCarloEngine:
         if self.seed is not None:
             random.seed(self.seed)
         self.results = None
+        
+        # Track frozen sites (dopants that existed in input structure)
+        self.frozen_indices = set()
 
     def generate_initial_structure(self):
         """
         Generate a random initial structure with the specified dopants.
+        
+        If the input structure already contains some dopants, only the additional
+        substitutions needed to reach the target counts are performed.
+        Existing dopants are marked as frozen and will not move during MC sampling.
 
         Returns:
             Structure: pymatgen Structure object with substitutions applied.
         """
         stru = self.base_structure.copy()
-        indices_by_element = {}
+        
+        # Identify dopant elements we're looking for
+        dopant_elements = set(sub["dopant_atom"] for sub in self.substitution_list)
+        
+        # Mark existing dopants as frozen (they won't move during MC)
+        self.frozen_indices = set()
+        for i, site in enumerate(stru.sites):
+            if site.specie.symbol in dopant_elements:
+                self.frozen_indices.add(i)
+        
+        # Count existing dopants in the input structure
+        existing_counts = {}
+        for site in stru.sites:
+            el = site.specie.symbol
+            existing_counts[el] = existing_counts.get(el, 0) + 1
+        
+        # Determine which substitutions still need to be made
+        # Group substitutions by (replaced_atom, dopant_atom) pair
+        substitution_targets = {}
+        for sub in self.substitution_list:
+            key = (sub["replaced_atom"], sub["dopant_atom"])
+            substitution_targets[key] = substitution_targets.get(key, 0) + 1
+        
+        # Calculate how many additional substitutions are needed
+        remaining_substitutions = []
+        for (replaced, dopant), target_count in substitution_targets.items():
+            current_dopant_count = existing_counts.get(dopant, 0)
+            additional_needed = target_count - current_dopant_count
+            
+            if additional_needed < 0:
+                raise ValueError(
+                    f"Input structure has {current_dopant_count} {dopant} atoms, "
+                    f"but only {target_count} requested. Cannot remove existing dopants."
+                )
+            
+            # Add the remaining substitutions needed
+            for _ in range(additional_needed):
+                remaining_substitutions.append({"replaced_atom": replaced, "dopant_atom": dopant})
+        
         # Map each element to its site indices
+        indices_by_element = {}
         for i, site in enumerate(stru.sites):
             el = site.specie.symbol
             indices_by_element.setdefault(el, []).append(i)
+        
         chosen_indices = set()
-        # Apply substitutions
-        for sub in self.substitution_list:
+        
+        # Apply only the remaining substitutions
+        for sub in remaining_substitutions:
             replaced, dopant = sub["replaced_atom"], sub["dopant_atom"]
             avail = [idx for idx in indices_by_element.get(replaced, []) if idx not in chosen_indices]
             if not avail:
-                raise RuntimeError(f"No available site for {replaced}")
+                raise RuntimeError(
+                    f"No available {replaced} site for substitution with {dopant}. "
+                    f"Current structure may already have the target composition."
+                )
             idx = random.choice(avail)
             chosen_indices.add(idx)
             stru.replace(idx, dopant)
+            
+            # Update indices_by_element to reflect the change
+            indices_by_element[replaced].remove(idx)
+            indices_by_element.setdefault(dopant, []).append(idx)
 
-        # Add interstitial atoms if defined at init
+        # Handle interstitial atoms
         if self.interstitial:
             element = list(self.interstitial.keys())[0]
             coords = self.interstitial[element]
-            stru.append(element, coords, coords_are_cartesian=False)
+            
+            # Check if interstitial already exists
+            existing_interstitial_count = existing_counts.get(element, 0)
+            
+            # Only add if not already present
+            if existing_interstitial_count == 0:
+                stru.append(element, coords, coords_are_cartesian=False)
+            else:
+                # If already present, mark existing interstitial as frozen
+                for i, site in enumerate(stru.sites):
+                    if site.specie.symbol == element:
+                        self.frozen_indices.add(i)
+        
         return stru
 
     def _count_element(self, structure, symbol):
@@ -165,7 +232,9 @@ class MonteCarloEngine:
         # ---- Interstitial move (Eu displacement) ----
         if self.interstitial and random.random() < interstitial_move_prob:
             element = list(self.interstitial.keys())[0]  # assume only Eu for now
-            indices = [i for i, site in enumerate(st) if site.specie.symbol == element]
+            # Only consider non-frozen interstitials for movement
+            indices = [i for i, site in enumerate(st) 
+                      if site.specie.symbol == element and i not in self.frozen_indices]
             if indices:
                 idx = random.choice(indices)
                 old_frac = st[idx].frac_coords.copy()
@@ -188,7 +257,8 @@ class MonteCarloEngine:
             dopant = sub["dopant_atom"]
             host = sub["replaced_atom"]
             for i, site in enumerate(st):
-                if site.specie.symbol == dopant:
+                # Skip frozen sites (dopants that existed in input structure)
+                if site.specie.symbol == dopant and i not in self.frozen_indices:
                     dopant_sites.append((i, dopant, host))
         if not dopant_sites:
             return (st, None) if return_info else st
@@ -481,6 +551,18 @@ class MonteCarloEngine:
                 f"Eu={z_info['n_Eu']}"
             )
             print(f"Total number of atoms in supercell: {len(current)}")
+            
+            # Report frozen sites
+            if self.frozen_indices:
+                print(f"\nFrozen sites (will not move during MC): {len(self.frozen_indices)} sites")
+                frozen_elements = {}
+                for idx in self.frozen_indices:
+                    el = current[idx].specie.symbol
+                    frozen_elements[el] = frozen_elements.get(el, 0) + 1
+                for el, count in sorted(frozen_elements.items()):
+                    print(f"  - {count} {el} atoms frozen")
+            else:
+                print("\nNo frozen sites - all dopants can move during MC")
 
 
         # Compute initial energy
