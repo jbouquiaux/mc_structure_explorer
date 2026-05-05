@@ -1,6 +1,0 @@
-numpy
-pymatgen
-ase
-mace-torch
-chemiscope
-tqdm
