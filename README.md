@@ -24,8 +24,7 @@ Results are written to `results/results_*.json` and interactive [Chemiscope](htt
 
 If you use this code, please cite the associated paper:
 
-https://pubs.acs.org/cmatex/article-abstract/38/14/7447/5208658/Microenvironment-of-the-Eu-Interstitial-in-SiAlON?redirectedFrom=fulltext
-
+Julien Bouquiaux, Samuel Poncé, Yongchao Jia, Masayoshi Mikami, Xavier Gonze; Microenvironment of the Eu Interstitial in β-SiAlON:Eu2+ Green Phosphor. Chem. Mater. 28 July 2026; 38 (14): 7447–7456. https://doi.org/10.1021/acs.chemmater.6c01369
 ## License
 
 MIT
