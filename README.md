@@ -24,7 +24,7 @@ Results are written to `results/results_*.json` and interactive [Chemiscope](htt
 
 If you use this code, please cite the associated paper:
 
-> TODO: insert paper reference here
+https://pubs.acs.org/cmatex/article-abstract/38/14/7447/5208658/Microenvironment-of-the-Eu-Interstitial-in-SiAlON?redirectedFrom=fulltext
 
 ## License
 
